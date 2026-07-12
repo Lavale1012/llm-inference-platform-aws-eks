@@ -1,0 +1,18 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+
+# State files (may contain secrets)
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# Variable files that may hold secrets
+*.tfvars
+*.tfvars.json
+!example.tfvars
+
+# CLI config
+.terraformrc
+terraform.rc
