@@ -16,3 +16,6 @@ crash.*.log
 # CLI config
 .terraformrc
 terraform.rc
+
+# Local Claude Code context (not shared)
+CLAUDE.md
