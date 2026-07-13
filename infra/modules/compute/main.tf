@@ -17,6 +17,10 @@ module "eks" {
     vpc-cni = {
       before_compute = true
     }
+    # Persistent volumes for model weights / caches (PVCs bind via this driver).
+    aws-ebs-csi-driver = {}
+    # Feeds the ContainerInsights metric namespace the node CPU/memory alarms read.
+    amazon-cloudwatch-observability = {}
   }
 
   # Optional
@@ -31,7 +35,9 @@ module "eks" {
 
   # EKS Managed Node Group(s)
   eks_managed_node_groups = {
-    example = {
+    # General-purpose (CPU) nodes: run system pods, the LB controller,
+    # CoreDNS, CSI/observability agents, etc.
+    system = {
       # Starting on 1.30, AL2023 is the default AMI type for EKS managed node groups
       ami_type       = var.ami
       instance_types = var.instance_types
@@ -39,6 +45,31 @@ module "eks" {
       min_size     = var.min_size
       max_size     = var.max_size
       desired_size = var.desired_size
+    }
+
+    # GPU nodes for LLM inference. Tainted so only GPU workloads (pods that
+    # tolerate nvidia.com/gpu) schedule here, keeping expensive GPUs free of
+    # system pods. Requires the NVIDIA device plugin DaemonSet in-cluster to
+    # advertise the nvidia.com/gpu resource.
+    gpu = {
+      ami_type       = var.gpu_ami_type
+      instance_types = var.gpu_instance_types
+
+      min_size     = var.gpu_min_size
+      max_size     = var.gpu_max_size
+      desired_size = var.gpu_desired_size
+
+      labels = {
+        "workload-type" = "gpu-inference"
+      }
+
+      taints = {
+        gpu = {
+          key    = "nvidia.com/gpu"
+          value  = "true"
+          effect = "NO_SCHEDULE"
+        }
+      }
     }
   }
 
@@ -114,6 +145,44 @@ resource "helm_release" "aws_lb_controller" {
     module.aws_lb_controller_pod_identity,
     module.eks,
   ]
+}
+
+# NVIDIA device plugin: a DaemonSet that advertises the nvidia.com/gpu resource
+# so Kubernetes can schedule GPU workloads. Without it, GPU nodes exist but pods
+# requesting nvidia.com/gpu stay Pending. It must tolerate the GPU taint and
+# only run on GPU nodes (nodeSelector on the label set in the gpu node group).
+resource "helm_release" "nvidia_device_plugin" {
+  name             = "nvidia-device-plugin"
+  repository       = "https://nvidia.github.io/k8s-device-plugin"
+  chart            = "nvidia-device-plugin"
+  namespace        = "nvidia-device-plugin"
+  create_namespace = true
+  version          = var.nvidia_device_plugin_chart_version
+
+  set = [
+    {
+      name  = "tolerations[0].key"
+      value = "nvidia.com/gpu"
+    },
+    {
+      name  = "tolerations[0].operator"
+      value = "Equal"
+    },
+    {
+      name  = "tolerations[0].value"
+      value = "true"
+    },
+    {
+      name  = "tolerations[0].effect"
+      value = "NoSchedule"
+    },
+    {
+      name  = "nodeSelector.workload-type"
+      value = "gpu-inference"
+    },
+  ]
+
+  depends_on = [module.eks]
 }
 
 # Private ECR repository for application images. EKS nodes can pull from it

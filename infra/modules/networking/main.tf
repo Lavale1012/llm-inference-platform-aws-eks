@@ -39,3 +39,66 @@ module "vpc" {
     Environment = "dev"
   }
 }
+
+# Security group for interface VPC endpoints: allow HTTPS from within the VPC.
+resource "aws_security_group" "vpc_endpoints" {
+  name_prefix = "${var.project_name}-vpce-"
+  description = "Allow HTTPS from the VPC to interface endpoints"
+  vpc_id      = module.vpc.vpc_id
+
+  ingress {
+    description = "HTTPS from VPC"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  tags = {
+    Terraform   = "true"
+    Environment = "dev"
+  }
+}
+
+# VPC endpoints keep ECR image pulls, S3 (model weights + layer blobs), and
+# CloudWatch logs off the NAT gateways, cutting data-processing cost and
+# keeping that traffic on the AWS backbone.
+module "vpc_endpoints" {
+  source  = "terraform-aws-modules/vpc/aws//modules/vpc-endpoints"
+  version = "~> 5.0"
+
+  vpc_id             = module.vpc.vpc_id
+  security_group_ids = [aws_security_group.vpc_endpoints.id]
+
+  endpoints = {
+    s3 = {
+      service         = "s3"
+      service_type    = "Gateway"
+      route_table_ids = module.vpc.private_route_table_ids
+      tags            = { Name = "${var.project_name}-s3-vpce" }
+    }
+    ecr_api = {
+      service             = "ecr.api"
+      private_dns_enabled = true
+      subnet_ids          = module.vpc.private_subnets
+      tags                = { Name = "${var.project_name}-ecr-api-vpce" }
+    }
+    ecr_dkr = {
+      service             = "ecr.dkr"
+      private_dns_enabled = true
+      subnet_ids          = module.vpc.private_subnets
+      tags                = { Name = "${var.project_name}-ecr-dkr-vpce" }
+    }
+    logs = {
+      service             = "logs"
+      private_dns_enabled = true
+      subnet_ids          = module.vpc.private_subnets
+      tags                = { Name = "${var.project_name}-logs-vpce" }
+    }
+  }
+
+  tags = {
+    Terraform   = "true"
+    Environment = "dev"
+  }
+}
