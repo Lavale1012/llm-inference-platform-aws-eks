@@ -16,3 +16,9 @@ variable "cluster_name" {
   default     = "aws-llm-eks"
 }
 
+variable "alert_email" {
+  type        = string
+  description = "Email address subscribed to the monitoring alarms SNS topic"
+  default     = "lavale889@gmail.com"
+}
+
