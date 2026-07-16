@@ -1,0 +1,138 @@
+name: app
+
+# Image build + deploy for the llama.cpp inference workload.
+#   PR:   build the image (catch Dockerfile breakage) — no push.
+#   main: build + push sha-<gitsha> to ECR, then roll the Deployment (skipped
+#         gracefully when no cluster is running).
+on:
+  pull_request:
+    paths:
+      - "llm/**"
+      - "k8s/**"
+      - ".github/workflows/app.yml"
+  push:
+    branches: [main]
+    paths:
+      - "llm/**"
+      - "k8s/**"
+      - ".github/workflows/app.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: aws-llm-ecr
+  CLUSTER_NAME: aws-llm-eks
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---- PR: build only, no push -------------------------------------------------
+  build:
+    name: build image (no push)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Build for the EKS node arch (amd64). GHA layer cache keeps the CUDA base
+      # + baked model layer warm across runs so we don't re-pull/re-download GBs.
+      - name: build
+        uses: docker/build-push-action@v6
+        with:
+          context: llm
+          platforms: linux/amd64
+          push: false
+          tags: ${{ env.ECR_REPOSITORY }}:pr-${{ github.event.pull_request.number }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---- main: build + push + deploy --------------------------------------------
+  push-deploy:
+    name: build, push, deploy
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Tag = sha-<short gitsha>, matching build-and-push.sh and the ECR
+      # lifecycle rule that GCs "sha-" images.
+      - name: compute image ref
+        id: img
+        run: |
+          REGISTRY="${{ steps.ecr.outputs.registry }}"
+          TAG="sha-$(git rev-parse --short HEAD)"
+          echo "registry=$REGISTRY"                      >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"                                >> "$GITHUB_OUTPUT"
+          echo "ref=$REGISTRY/${{ env.ECR_REPOSITORY }}:$TAG" >> "$GITHUB_OUTPUT"
+
+      # Idempotency: ECR tags are IMMUTABLE, so re-running on the same commit
+      # would fail on push. If the tag already exists, skip build+push and just
+      # (re)deploy it.
+      - name: check if image already pushed
+        id: exists
+        run: |
+          if aws ecr describe-images \
+               --repository-name "${{ env.ECR_REPOSITORY }}" \
+               --image-ids imageTag="${{ steps.img.outputs.tag }}" \
+               --region "${{ env.AWS_REGION }}" >/dev/null 2>&1; then
+            echo "found=true"  >> "$GITHUB_OUTPUT"
+            echo "::notice::Image ${{ steps.img.outputs.tag }} already in ECR — skipping build/push."
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: set up buildx
+        if: steps.exists.outputs.found == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: build and push
+        if: steps.exists.outputs.found == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: llm
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.img.outputs.ref }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      # Deploy only if the cluster is up (it's torn down between sessions to save
+      # GPU cost). `kubectl apply -k` is idempotent: it creates
+      # namespace/Service/Ingress/Deployment on a fresh cluster, or rolls the
+      # Deployment on an update.
+      - name: deploy (if cluster is up)
+        run: |
+          status="$(aws eks describe-cluster --name "${{ env.CLUSTER_NAME }}" \
+            --region "${{ env.AWS_REGION }}" \
+            --query 'cluster.status' --output text 2>/dev/null || echo NONE)"
+          if [ "$status" != "ACTIVE" ]; then
+            echo "::notice::Cluster not ACTIVE (status=$status) — image pushed (${{ steps.img.outputs.ref }}), deploy skipped."
+            exit 0
+          fi
+          aws eks update-kubeconfig --name "${{ env.CLUSTER_NAME }}" --region "${{ env.AWS_REGION }}"
+          # Install the official kustomize CLI (kubectl's bundled copy can't
+          # `edit` in place). Pin the image for this deploy, then apply.
+          curl -sSfL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          cd k8s
+          ../kustomize edit set image llm-inference="${{ steps.img.outputs.ref }}"
+          kubectl apply -k .
+          kubectl rollout status deployment/llm-inference -n llm --timeout=10m

@@ -22,3 +22,8 @@ output "vpc_id" {
   description = "ID of the VPC"
   value       = module.networking.vpc_id
 }
+
+output "github_actions_role_arn" {
+  description = "ARN of the IAM role GitHub Actions assumes via OIDC (set as the AWS_CI_ROLE_ARN repo variable)"
+  value       = aws_iam_role.github_actions.arn
+}

@@ -1,4 +1,8 @@
 terraform {
+  # Pinned to match CI (GitHub Actions uses Terraform 1.9.x) so local and
+  # pipeline runs resolve the same CLI behaviour.
+  required_version = "~> 1.9"
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -78,6 +82,12 @@ module "compute" {
   max_size                 = 10
   desired_size             = 2
   repository_name          = var.project_name
+
+  # Grant the GitHub Actions CI role push access to ECR (repository policy) and
+  # kubectl access to the cluster (EKS access entry). Any extra ARNs supplied
+  # via var.ecr_push_role_arns are appended to the ECR push list.
+  ci_role_arn        = aws_iam_role.github_actions.arn
+  ecr_push_role_arns = concat([aws_iam_role.github_actions.arn], var.ecr_push_role_arns)
 }
 
 module "monitoring" {

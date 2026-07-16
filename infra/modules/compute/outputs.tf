@@ -8,6 +8,11 @@ output "cluster_endpoint" {
   value       = module.eks.cluster_endpoint
 }
 
+output "cluster_arn" {
+  description = "ARN of the EKS cluster"
+  value       = module.eks.cluster_arn
+}
+
 output "cluster_certificate_authority_data" {
   description = "Base64-encoded CA certificate for the cluster"
   value       = module.eks.cluster_certificate_authority_data

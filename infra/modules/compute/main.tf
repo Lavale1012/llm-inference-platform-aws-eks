@@ -29,6 +29,24 @@ module "eks" {
   # Optional: Adds the current caller identity as an administrator via cluster access entry
   enable_cluster_creator_admin_permissions = true
 
+  # Grant the CI/CD role kubectl access, scoped to the "llm" namespace (it only
+  # needs to roll the inference Deployment, not administer the cluster). Keyed
+  # off var.ci_role_arn so an empty string leaves access_entries empty (no-op).
+  access_entries = var.ci_role_arn == "" ? {} : {
+    ci = {
+      principal_arn = var.ci_role_arn
+      policy_associations = {
+        namespace_admin = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminPolicy"
+          access_scope = {
+            type       = "namespace"
+            namespaces = ["llm"]
+          }
+        }
+      }
+    }
+  }
+
   vpc_id                   = var.vpc_id
   subnet_ids               = var.subnet_ids
   control_plane_subnet_ids = var.control_plane_subnet_ids
@@ -205,16 +223,46 @@ module "ecr" {
     var.ecr_push_role_arns,
   )
 
+  # Lifecycle rules are evaluated by ascending priority; each image is expired by
+  # at most one rule. CI pushes "sha-<gitsha>" tags (see build-and-push.sh) and
+  # releases use "v" tags — both prefixes need their own keep-rule, or one class
+  # accumulates forever (each image is multi-GB: CUDA base + baked model).
   repository_lifecycle_policy = jsonencode({
     rules = [
       {
         rulePriority = 1,
-        description  = "Keep last 30 tagged images",
+        description  = "Keep last 30 release (v-prefixed) images",
         selection = {
           tagStatus     = "tagged",
           tagPrefixList = ["v"],
           countType     = "imageCountMoreThan",
           countNumber   = 30
+        },
+        action = {
+          type = "expire"
+        }
+      },
+      {
+        rulePriority = 2,
+        description  = "Keep last 20 CI (sha-prefixed) images",
+        selection = {
+          tagStatus     = "tagged",
+          tagPrefixList = ["sha-"],
+          countType     = "imageCountMoreThan",
+          countNumber   = 20
+        },
+        action = {
+          type = "expire"
+        }
+      },
+      {
+        rulePriority = 3,
+        description  = "Expire untagged images after 3 days",
+        selection = {
+          tagStatus   = "untagged",
+          countType   = "sinceImagePushed",
+          countUnit   = "days",
+          countNumber = 3
         },
         action = {
           type = "expire"
