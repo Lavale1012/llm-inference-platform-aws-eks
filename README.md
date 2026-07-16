@@ -96,11 +96,13 @@ aws eks update-kubeconfig --name aws-llm-eks --region us-east-1
 
 # 3. Build the inference image and push it to ECR
 cd ../llm
-./build-and-push.sh          # prints the pushed image URI
+./build-and-push.sh          # prints the pushed image URI (…/aws-llm-ecr:sha-<gitsha>)
 
-# 4. Set that image URI in k8s/deployment.yaml, then deploy
+# 4. Pin that image and deploy (CI does this automatically; manual equivalent):
+cd ../k8s
+kustomize edit set image llm-inference=<pushed-image-uri>   # e.g. …/aws-llm-ecr:sha-<gitsha>
+kubectl apply -k .
 cd ..
-kubectl apply -f k8s/
 
 # 5. Get the ALB URL (takes ~2-3 min to provision)
 kubectl get ingress llm-inference -n llm \
@@ -122,42 +124,79 @@ curl "$LLM_ENDPOINT/v1/chat/completions" \
 
 ---
 
-## CI/CD pipeline _(planned — described, not yet implemented)_
+## CI/CD pipeline
 
-The intended pipeline (e.g. GitHub Actions) separates the image lifecycle from
-the infrastructure lifecycle:
+Two path-filtered GitHub Actions workflows separate the image lifecycle from the
+infrastructure lifecycle. Both authenticate to AWS via **GitHub OIDC** (no
+long-lived access keys) by assuming the `aws-llm-github-actions` IAM role.
 
 ```text
    push to main / PR
           │
-          ├─────────────► llm/** changed ──────────────┐
+          ├─────────────► llm/** or k8s/** ────────────┐   (.github/workflows/app.yml)
           │                                             ▼
-          │                                   ┌──────────────────┐
-          │                                   │ build image      │
-          │                                   │ (linux/amd64)    │
-          │                                   │ scan → push ECR  │
-          │                                   │ tag = git SHA    │
-          │                                   └────────┬─────────┘
-          │                                            ▼
-          │                                   kubectl set image
-          │                                   (rolling deploy)
+          │                                   ┌──────────────────────┐
+          │                                   │ build image          │
+          │                                   │ (linux/amd64, GHA     │
+          │                                   │  layer cache)         │
+          │                                   │ PR: build only        │
+          │                                   │ main: push ECR        │
+          │                                   │   tag = sha-<gitsha>  │
+          │                                   └──────────┬───────────┘
+          │                                              ▼
+          │                                   kustomize set image +
+          │                                   kubectl apply -k k8s/
+          │                                   (skipped if no cluster)
           │
-          └─────────────► infra/** changed ───────────┐
-                                                       ▼
-                                          ┌────────────────────────┐
-                                          │ terraform fmt -check   │
-                                          │ terraform validate     │
-                                          │ terraform plan (PR)    │
-                                          │ terraform apply (main) │
-                                          └────────────────────────┘
+          └─────────────► infra/** ────────────────────┐   (.github/workflows/infra.yml)
+                                                        ▼
+                                          ┌─────────────────────────┐
+                                          │ terraform fmt -check     │
+                                          │ terraform validate       │
+                                          │ terraform plan (PR       │
+                                          │   → posts plan comment)  │
+                                          │ terraform apply (main,   │
+                                          │   manual-approval gate)  │
+                                          └─────────────────────────┘
 ```
 
-- **Image path:** build → scan (ECR scan-on-push is already enabled) → push
-  with the immutable git-SHA tag → roll the Deployment.
-- **Infra path:** `fmt`/`validate`/`plan` on PRs; gated `apply` on merge to
-  `main`.
-- **Auth:** GitHub OIDC → an IAM role added to `ecr_push_role_arns`
-  (the variable already exists in the compute module for exactly this).
+- **Image path (`app.yml`):** PRs build the image to catch breakage (no push).
+  Merges to `main` push `sha-<gitsha>` to ECR (scan-on-push is enabled), then
+  pin that image via kustomize and `kubectl apply -k k8s/`. The push is
+  **idempotent** — re-running on the same commit detects the existing immutable
+  tag and skips straight to deploy. The deploy step **skips gracefully** if the
+  cluster isn't running (it's torn down between sessions to save GPU cost).
+- **Infra path (`infra.yml`):** `fmt`/`validate`/`plan` on PRs (the plan is
+  posted as a PR comment); on merge to `main`, `apply` runs behind a **manual
+  approval gate** via the `production-infra` GitHub Environment.
+- **Auth:** GitHub OIDC → the `aws-llm-github-actions` role (defined in
+  [`infra/cicd.tf`](infra/cicd.tf)). Its ARN is fed into the compute module's
+  `ecr_push_role_arns` (ECR repository policy) and a namespace-scoped EKS
+  **access entry** (`kubectl` in the `llm` namespace only).
+
+### One-time setup
+
+The pipeline assumes remote state is active and the CI role exists. Bootstrap:
+
+```bash
+# 1. Activate S3 remote state (CI plan/apply needs shared state + locking)
+cd infra/bootstrap && terraform init && terraform apply   # creates aws-llm-tfstate-us-east-1
+cd ..                                                       # then uncomment the backend block in backend.tf
+terraform init -migrate-state                               # moves local state → S3
+
+# 2. Create the CI IAM role (chicken-and-egg: CI needs it before it can run).
+#    First run `aws iam list-open-id-connect-providers` — if a GitHub OIDC
+#    provider already exists in the account, import it instead of creating a
+#    duplicate (see the note in infra/cicd.tf).
+terraform apply
+terraform output -raw github_actions_role_arn              # → set as GitHub repo variable AWS_CI_ROLE_ARN
+
+# 3. In the GitHub repo: Settings → Environments → create "production-infra"
+#    with a required reviewer (this is what makes the infra apply gate real).
+```
+
+CI uses **Terraform 1.14.6** (the config pins `required_version = "~> 1.9"`, so
+local and CI stay compatible).
 
 ---
 

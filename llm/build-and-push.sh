@@ -7,9 +7,10 @@ AWS_REGION="${AWS_REGION:-us-east-1}"
 # The ECR repo is created by Terraform (modules/compute), NOT by this script.
 REPO="${REPO:-aws-llm-ecr}"
 # ECR tags are IMMUTABLE (set in Terraform), so a static tag like "v1" can only
-# be pushed once. Default to the short git SHA (falls back to a timestamp) so
-# every build gets a unique, re-pushable tag.
-TAG="${TAG:-$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d-%H%M%S)}"
+# be pushed once. Default to "sha-<short git SHA>" (falls back to a timestamp)
+# so every build gets a unique, re-pushable tag. The "sha-" prefix matches the
+# ECR lifecycle rule that garbage-collects CI images (Terraform: modules/compute).
+TAG="${TAG:-sha-$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d-%H%M%S)}"
 # -----------------------------------------------------------------------------
 
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)

@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# All manifests for the LLM inference workload. Deploy with:
+#   kubectl apply -k k8s/
+# (kubectl applies these idempotently: it creates the namespace/Service/Ingress/
+# Deployment on a fresh cluster, or rolls the Deployment on an update.)
+resources:
+  - namespace.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+# The Deployment references the logical image name "llm-inference". CI overrides
+# it per build with the freshly pushed ECR image+tag via:
+#   kustomize edit set image llm-inference=<ecr-repo-url>:sha-<gitsha>
+# which rewrites the newName/newTag below. The committed default is a
+# non-functional placeholder — the pipeline (or a manual `kustomize edit set
+# image`) supplies the real value at deploy time.
+images:
+  - name: llm-inference
+    newName: llm-inference
+    newTag: latest

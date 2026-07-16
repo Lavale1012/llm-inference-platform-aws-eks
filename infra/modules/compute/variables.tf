@@ -102,6 +102,12 @@ variable "ecr_push_role_arns" {
   default     = []
 }
 
+variable "ci_role_arn" {
+  type        = string
+  description = "IAM role ARN granted kubectl access (EKS access entry, scoped to the llm namespace) for CI/CD deploys. Empty disables the access entry."
+  default     = ""
+}
+
 variable "image_tag_mutability" {
   type        = string
   description = "ECR image tag mutability: MUTABLE or IMMUTABLE"

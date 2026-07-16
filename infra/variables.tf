@@ -22,3 +22,15 @@ variable "alert_email" {
   default     = "lavale889@gmail.com"
 }
 
+variable "github_repository" {
+  type        = string
+  description = "GitHub repo (owner/name) allowed to assume the CI/CD OIDC role"
+  default     = "Lavale1012/llm-inference-platform-aws-eks"
+}
+
+variable "ecr_push_role_arns" {
+  type        = list(string)
+  description = "Extra IAM role ARNs granted push access to the ECR repository (in addition to the CI/CD role, which is added automatically)"
+  default     = []
+}
+

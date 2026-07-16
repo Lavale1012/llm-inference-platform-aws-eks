@@ -1,0 +1,157 @@
+name: infra
+
+# Terraform lifecycle for infra/. PRs get fmt/validate/plan (posted as a comment);
+# merges to main run a gated apply (the "production-infra" GitHub Environment
+# must have a required reviewer to make the gate meaningful).
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - ".github/workflows/infra.yml"
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - ".github/workflows/infra.yml"
+
+# OIDC: id-token lets the job fetch a GitHub OIDC token to assume the AWS role.
+# pull-requests: write lets the plan job post/update a PR comment.
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: "1.14.6" # satisfies the config's required_version = "~> 1.9"
+  # terraform plan/apply run from the infra/ root config.
+  TF_WORKING_DIR: infra
+
+# Serialize infra runs so two applies can't race (belt-and-suspenders on top of
+# S3 state locking).
+concurrency:
+  group: infra-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: fmt / validate / plan
+    runs-on: ubuntu-latest
+    outputs:
+      plan_exitcode: ${{ steps.plan.outputs.exitcode }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: terraform fmt
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform fmt -check -recursive
+
+      # Use the committed lockfile as-is (fail if it would change) for
+      # reproducible provider versions.
+      - name: terraform init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -lockfile=readonly
+
+      - name: terraform validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform validate
+
+      # -detailed-exitcode: 0 = no changes, 2 = changes present, 1 = error.
+      # We tolerate 2 here (a plan with changes is not a failure on a PR) and
+      # surface it in the comment.
+      - name: terraform plan
+        id: plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          set +e
+          terraform plan -no-color -input=false -lock-timeout=5m \
+            -detailed-exitcode -out=tfplan | tee plan.txt
+          code=${PIPESTATUS[0]}
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          # Trim to the last 60k chars so a huge plan fits in a PR comment.
+          { echo '```terraform'; tail -c 60000 plan.txt; echo '```'; } > plan_comment.md
+          [ "$code" -eq 1 ] && exit 1 || exit 0
+
+      - name: comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+          PLAN_DIR: ${{ env.TF_WORKING_DIR }}
+        with:
+          script: |
+            const fs = require('fs');
+            const changed = process.env.PLAN_EXITCODE === '2';
+            const body = `### Terraform plan (\`infra/\`)\n` +
+              (changed ? '_Changes detected._\n\n' : '_No changes._\n\n') +
+              fs.readFileSync(`${process.env.PLAN_DIR}/plan_comment.md`, 'utf8');
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const marker = '### Terraform plan (`infra/`)';
+            const existing = comments.find(c => c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body,
+              });
+            }
+
+      # Persist the plan so the apply job runs exactly what was reviewed.
+      - name: upload plan artifact
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_WORKING_DIR }}/tfplan
+          retention-days: 1
+
+  apply:
+    name: apply (gated)
+    needs: plan
+    # Only on merge to main, and only if the plan actually had changes (exit 2).
+    if: github.event_name == 'push' && needs.plan.outputs.plan_exitcode == '2'
+    runs-on: ubuntu-latest
+    # The gate: this Environment must be configured with a required reviewer in
+    # repo settings, or the apply proceeds unattended.
+    environment: production-infra
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: terraform init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init -lockfile=readonly
+
+      - name: download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_WORKING_DIR }}
+
+      - name: terraform apply
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform apply -input=false -lock-timeout=5m tfplan

@@ -26,9 +26,13 @@ spec:
           effect: NoSchedule
       containers:
         - name: llama-server
-          # Replace <ACCOUNT_ID> and the tag with the image build-and-push.sh
-          # pushed, e.g. 582287676709.dkr.ecr.us-east-1.amazonaws.com/aws-llm-ecr:<sha>
-          image: <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/aws-llm-ecr:REPLACE_ME
+          # Logical image name — kustomize rewrites this to the real ECR URI at
+          # deploy time (see k8s/kustomization.yaml; CI runs `kustomize edit set
+          # image llm-inference=<ecr-url>:<tag>`). For a manual deploy, either
+          # run `kustomize edit set image ...` too, or replace this line with the
+          # URI build-and-push.sh printed, e.g.
+          #   582287676709.dkr.ecr.us-east-1.amazonaws.com/aws-llm-ecr:sha-<sha>
+          image: llm-inference:latest
           ports:
             - containerPort: 8080
           resources:
