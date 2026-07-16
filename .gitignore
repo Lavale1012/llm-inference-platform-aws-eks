@@ -19,3 +19,7 @@ terraform.rc
 
 # Local Claude Code context (not shared)
 CLAUDE.md
+
+# Python
+__pycache__/
+*.pyc

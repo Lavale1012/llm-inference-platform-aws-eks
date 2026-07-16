@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-inference
+  namespace: llm
+  labels:
+    app: llm-inference
+spec:
+  # ClusterIP: the ALB (via the Ingress) targets pods; no need to expose the
+  # Service itself externally.
+  type: ClusterIP
+  selector:
+    app: llm-inference
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080

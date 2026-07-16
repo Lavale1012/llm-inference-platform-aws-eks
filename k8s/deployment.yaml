@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-inference
+  namespace: llm
+  labels:
+    app: llm-inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-inference
+  template:
+    metadata:
+      labels:
+        app: llm-inference
+    spec:
+      # Land on the GPU node group and tolerate its taint. These must match the
+      # label/taint set on the "gpu" node group in the compute module.
+      nodeSelector:
+        workload-type: gpu-inference
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: llama-server
+          # Replace <ACCOUNT_ID> and the tag with the image build-and-push.sh
+          # pushed, e.g. 582287676709.dkr.ecr.us-east-1.amazonaws.com/aws-llm-ecr:<sha>
+          image: <ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/aws-llm-ecr:REPLACE_ME
+          ports:
+            - containerPort: 8080
+          resources:
+            # Requesting a GPU is what makes the scheduler place this on a GPU
+            # node (and the NVIDIA device plugin makes the resource available).
+            limits:
+              nvidia.com/gpu: 1
+              memory: "8Gi"
+            requests:
+              cpu: "1"
+              memory: "4Gi"
+          # llama-server serves /health once the model is loaded. Give it a
+          # generous startup window since the model loads into GPU memory first.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 20

@@ -1,0 +1,26 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: llm-inference
+  namespace: llm
+  annotations:
+    # Provisioned by the AWS Load Balancer Controller (installed via Terraform).
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    # IP targets register pod IPs directly (works with the VPC CNI). Requires
+    # the model pods to be running; the controller finds public subnets via the
+    # kubernetes.io/role/elb tags set on the VPC in the networking module.
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: llm-inference
+                port:
+                  number: 80
