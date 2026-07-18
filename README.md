@@ -42,22 +42,12 @@ Balancer. Built end-to-end with **Terraform** and **Kubernetes**.
 
 ## Architecture at a glance
 
-```text
-   Internet ──► ALB (provisioned by the AWS Load Balancer Controller from a
-                     Kubernetes Ingress — target-type: ip)
-                 │
-   ┌─────────────┼──────────── VPC (10.0.0.0/16, multi-AZ) ───────────────┐
-   │  Public subnets ──► ALB, NAT gateways                                 │
-   │  Private subnets ──► EKS nodes:                                       │
-   │        • system node group (m5.xlarge)  — CoreDNS, LB Controller,     │
-   │                                            NVIDIA plugin, add-ons     │
-   │        • gpu node group (g5.xlarge, A10G, tainted) — llama-server pod │
-   │  VPC endpoints: S3 · ECR api/dkr · CloudWatch logs                    │
-   └──────────────────────────────────────────────────────────────────────┘
-        │                         │                          │
-   Private ECR             CloudWatch + SNS          Prometheus + Grafana
-   (image registry)        (alarms, live)            (metrics, planned)
-```
+![aws-llm architecture](docs/architecture.png)
+
+Four color-coded flows: the **request path ①②③** (client → ALB → GPU pod), the
+**CI/CD path ⒶⒷⒸⒹ** (GitHub Actions → OIDC → ECR / Terraform / deploy), the
+private **image pull** (pod → VPC endpoints → ECR), and **observability**
+(CloudWatch → SNS). Each node is annotated with _why_ that service was chosen.
 
 A client sends `POST /v1/chat/completions` to the ALB → the request routes to
 the `llama-server` pod on a GPU node → inference runs on the NVIDIA A10G and
