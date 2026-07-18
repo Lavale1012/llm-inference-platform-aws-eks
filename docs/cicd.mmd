@@ -1,0 +1,55 @@
+%% aws-llm — CI/CD pipeline (GitHub Actions)
+%% Render: paste into https://mermaid.live, or `mmdc -i docs/cicd.mmd -o docs/cicd.png`
+flowchart TB
+    dev(["Developer:<br/>open PR / push to main"]):::actor
+
+    dev --> filter{"changed paths?"}:::decision
+
+    %% ============ infra.yml ============
+    filter -->|"infra/**"| infra_start(["infra.yml"]):::wf
+    infra_start --> infra_auth["OIDC → assume<br/>aws-llm-github-actions"]:::auth
+    infra_auth --> tf_fmt["terraform fmt -check"]:::step
+    tf_fmt --> tf_init["terraform init<br/>(-lockfile=readonly)"]:::step
+    tf_init --> tf_val["terraform validate"]:::step
+    tf_val --> tf_plan["terraform plan<br/>-detailed-exitcode"]:::step
+    tf_plan --> infra_evt{"event?"}:::decision
+
+    infra_evt -->|"pull_request"| pr_comment["post plan as<br/>PR comment"]:::step
+    pr_comment --> infra_pr_done(["✔ PR checks pass"]):::done
+
+    infra_evt -->|"push to main"| plan_gate{"plan exit code<br/>= 2 (changes)?"}:::decision
+    plan_gate -->|"0 — no changes"| infra_noop(["✔ nothing to apply"]):::done
+    plan_gate -->|"2 — changes"| gate["🔒 environment:<br/>production-infra<br/>(manual approval)"]:::gate
+    gate --> tf_apply["terraform apply tfplan<br/>(the reviewed plan)"]:::apply
+    tf_apply --> infra_applied(["✔ infra updated"]):::done
+
+    %% ============ app.yml ============
+    filter -->|"llm/** or k8s/**"| app_start(["app.yml"]):::wf
+    app_start --> app_evt{"event?"}:::decision
+
+    app_evt -->|"pull_request"| pr_build["docker build linux/amd64<br/>(GHA cache, NO push)"]:::step
+    pr_build --> app_pr_done(["✔ image builds"]):::done
+
+    app_evt -->|"push to main"| app_auth["OIDC → assume role<br/>→ ECR login"]:::auth
+    app_auth --> tag["compute tag:<br/>sha-&lt;gitsha&gt;"]:::step
+    tag --> exists{"tag already<br/>in ECR?"}:::decision
+    exists -->|"yes (immutable)"| skip_build["skip build/push"]:::skip
+    exists -->|"no"| build_push["docker build + push<br/>sha-&lt;gitsha&gt; → ECR"]:::apply
+    skip_build --> cluster
+    build_push --> cluster
+
+    cluster{"cluster ACTIVE?<br/>(torn down between<br/>sessions)"}:::decision
+    cluster -->|"no"| skip_deploy(["⚠ image pushed,<br/>deploy skipped"]):::warn
+    cluster -->|"yes"| deploy["kustomize set image →<br/>kubectl apply -k →<br/>rollout status"]:::apply
+    deploy --> app_done(["✔ Deployment rolled"]):::done
+
+    classDef actor    fill:#1f2937,stroke:#111827,color:#fff,font-weight:bold;
+    classDef wf       fill:#2088ff,stroke:#0b5cff,color:#fff,font-weight:bold;
+    classDef auth     fill:#dd344c,stroke:#a01b2f,color:#fff;
+    classDef step     fill:#eef2ff,stroke:#6366f1,color:#111;
+    classDef decision fill:#fff7ed,stroke:#f59e0b,color:#111,font-weight:bold;
+    classDef gate     fill:#fde68a,stroke:#b45309,color:#111,font-weight:bold;
+    classDef apply    fill:#f58536,stroke:#b45f18,color:#fff,font-weight:bold;
+    classDef skip     fill:#e5e7eb,stroke:#9ca3af,color:#374151;
+    classDef warn     fill:#fee2e2,stroke:#dc2626,color:#7f1d1d,font-weight:bold;
+    classDef done     fill:#dcfce7,stroke:#16a34a,color:#14532d,font-weight:bold;
