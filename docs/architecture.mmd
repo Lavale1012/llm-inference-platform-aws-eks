@@ -1,0 +1,70 @@
+%% aws-llm — architecture map
+%% Render to an image:
+%%   • paste into https://mermaid.live  (Actions → PNG/SVG)
+%%   • VS Code: "Markdown Preview Mermaid Support" / "Mermaid Preview" extension
+%%   • GitHub renders ```mermaid fenced blocks inline
+flowchart TB
+    user([Client<br/>chat.py / curl]):::ext
+    dev([Developer<br/>git push / PR]):::ext
+    gha["GitHub Actions<br/>app.yml · infra.yml"]:::cicd
+
+    subgraph AWS["AWS · us-east-1"]
+        direction TB
+
+        oidc["IAM OIDC provider<br/>+ aws-llm-github-actions role"]:::iam
+        ecr["ECR (private)<br/>aws-llm-ecr<br/>immutable · scan-on-push"]:::reg
+        s3state["S3<br/>aws-llm-tfstate-us-east-1<br/>(remote state)"]:::store
+
+        subgraph VPC["VPC · 10.0.0.0/16 · 2 AZs (us-east-1a/b)"]
+            direction TB
+
+            subgraph PUB["Public subnets · 10.0.10-11.0/24"]
+                igw{{Internet Gateway}}:::net
+                alb["Application Load Balancer<br/>(created by LB Controller<br/>from a K8s Ingress)"]:::net
+                nat{{NAT gateways ×2}}:::net
+            end
+
+            subgraph PRIV["Private subnets · 10.0.1-2.0/24"]
+                direction TB
+                subgraph EKS["EKS cluster · aws-llm-eks · v1.33"]
+                    direction TB
+                    subgraph SYS["system node group · m5.xlarge"]
+                        syspods["CoreDNS · kube-proxy<br/>AWS LB Controller<br/>NVIDIA device plugin<br/>EBS CSI · CW Observability"]:::pod
+                    end
+                    subgraph GPU["gpu node group · g5.xlarge (A10G)<br/>taint nvidia.com/gpu"]
+                        llm["llm-inference Deployment<br/>llama-server :8080<br/>Llama-3.2-1B GGUF (CUDA)"]:::pod
+                    end
+                end
+                vpce["VPC endpoints<br/>S3 (gw) · ECR api/dkr · CW logs"]:::net
+            end
+        end
+
+        cw["CloudWatch alarms<br/>+ SNS (email)"]:::obs
+    end
+
+    %% request path
+    user -->|"HTTP :80<br/>/v1/chat/completions"| igw --> alb
+    alb -->|"target-type: ip<br/>(pod IPs via VPC CNI)"| llm
+
+    %% egress
+    llm -. egress .-> nat --> igw
+    llm -->|pull image| vpce --> ecr
+
+    %% cicd path
+    dev --> gha
+    gha -->|"OIDC assume-role"| oidc
+    gha -->|"push sha-&lt;gitsha&gt;"| ecr
+    gha -->|"terraform<br/>plan · apply"| s3state
+    gha -->|"kubectl<br/>apply -k"| llm
+
+    %% observability
+    EKS -. metrics/logs .-> cw
+
+    classDef ext   fill:#1f2937,stroke:#9ca3af,color:#fff;
+    classDef cicd  fill:#2088ff,stroke:#0b5cff,color:#fff;
+    classDef iam   fill:#dd344c,stroke:#a01b2f,color:#fff;
+    classDef reg   fill:#f58536,stroke:#b45f18,color:#fff;
+    classDef net   fill:#8c4fff,stroke:#5b2fb0,color:#fff;
+    classDef pod   fill:#00a4a6,stroke:#00696b,color:#fff;
+    classDef store fill:#3b48cc,stroke:#232f9e,color:#fff;
+    classDef obs   fill:#e7157b,stroke:#a30d57,color:#fff;

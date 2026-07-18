@@ -14,40 +14,14 @@ provisioned by the AWS Load Balancer Controller.
 
 ## Architecture
 
-```text
-                              Internet
-                                 │
-                                 ▼
-                   ┌──────────────────────────┐
-                   │  Application Load Balancer│  (internet-facing, HTTP :80)
-                   │  created by LB Controller │
-                   │  from a K8s Ingress       │
-                   └────────────┬──────────────┘
-                                │  target-type: ip
-   ┌────────────────────────────┼──────────────────────────────────┐
-   │  VPC (10.0.0.0/16, multi-AZ)                                    │
-   │                                                                 │
-   │   Public subnets ──► ALB, NAT gateways                          │
-   │                                                                 │
-   │   Private subnets ─────────────────────────────────────────┐   │
-   │   ┌───────────────────────┐   ┌───────────────────────────┐│   │
-   │   │  system node group    │   │  gpu node group           ││   │
-   │   │  (m5.xlarge, on-demand)│  │  (g5.xlarge, NVIDIA A10G) ││   │
-   │   │                       │   │  taint: nvidia.com/gpu    ││   │
-   │   │  • CoreDNS            │   │  ┌─────────────────────┐  ││   │
-   │   │  • LB Controller      │   │  │ llm-inference pod    │  ││   │
-   │   │  • NVIDIA dev plugin  │   │  │  llama-server :8080  │  ││   │
-   │   │  • EBS CSI / CW agent │   │  │  Llama-3.2-1B GGUF   │  ││   │
-   │   └───────────────────────┘   │  └─────────────────────┘  ││   │
-   │                               └───────────────────────────┘│   │
-   │                                                            │   │
-   │   VPC endpoints: S3 (gw) · ECR api/dkr · CW logs ──────────┘   │
-   └─────────────────────────────────────────────────────────────────┘
-        │                          │                         │
-        ▼                          ▼                         ▼
-   Private ECR              CloudWatch + SNS          Prometheus + Grafana
-   (image registry)         (alarms, live)            (metrics, planned)
-```
+![aws-llm architecture](docs/architecture.png)
+
+Four color-coded flows: the **request path ①②③** (client → ALB → GPU pod), the
+**CI/CD path ⒶⒷⒸⒹ** (GitHub Actions → OIDC → ECR / Terraform / deploy), the
+private **image pull** (pod → VPC endpoints → ECR), and **observability**
+(CloudWatch → SNS). Each node is annotated with _why_ that service was chosen.
+See [docs/architecture.md](docs/architecture.md) for the full walkthrough and an
+editable Mermaid version.
 
 ### Request flow
 
